@@ -76,6 +76,9 @@ Usage: autorandr [options]
 --dry-run               don't change anything, only print the xrandr commands
 --fingerprint           fingerprint your current hardware setup
 --force                 force (re)loading of a profile
+--do-not-fingerprint    comma separated list of xrandr output names to skip from
+                        fingerprinting both in creating and matching a profile.
+--skip-off-screens      
 --skip-options <option> comma separated list of xrandr arguments (e.g. "gamma")
                         to skip both in detecting changes and applying a profile
 
@@ -533,7 +536,7 @@ def get_symlinks(profile_path):
     return symlinks
 
 
-def find_profiles(current_config, profiles):
+def find_profiles(current_config, profiles, skip_from_fingerprinting):
     "Find profiles matching the currently connected outputs"
     detected_profiles = []
     for profile_name, profile in profiles.items():
@@ -542,10 +545,13 @@ def find_profiles(current_config, profiles):
         for name, output in config.items():
             if not output.edid:
                 continue
+            if name in skip_from_fingerprinting:
+                matches = False
+                break
             if name not in current_config or not output.edid_equals(current_config[name]):
                 matches = False
                 break
-        if not matches or any((name not in config.keys() for name in current_config.keys() if current_config[name].edid)):
+        if any((name not in config.keys() for name in current_config.keys() if current_config[name].edid and name not in skip_from_fingerprinting)):
             continue
         if matches:
             detected_profiles.append(profile_name)
@@ -568,22 +574,22 @@ def output_configuration(configuration, config):
         print(configuration[output].option_string, file=config)
 
 
-def output_setup(configuration, setup):
+def output_setup(configuration, setup, skip_from_fingerprinting):
     "Write a setup (fingerprint) file"
     outputs = sorted(configuration.keys())
     for output in outputs:
-        if configuration[output].edid:
+        if configuration[output].edid and output not in skip_from_fingerprinting:
             print(output, configuration[output].edid, file=setup)
 
 
-def save_configuration(profile_path, configuration):
+def save_configuration(profile_path, configuration, skip_from_fingerprinting):
     "Save a configuration into a profile"
     if not os.path.isdir(profile_path):
         os.makedirs(profile_path)
     with open(os.path.join(profile_path, "config"), "w") as config:
         output_configuration(configuration, config)
     with open(os.path.join(profile_path, "setup"), "w") as setup:
-        output_setup(configuration, setup)
+        output_setup(configuration, setup, skip_from_fingerprinting)
 
 
 def update_mtime(filename):
@@ -1022,11 +1028,19 @@ def read_config(options, directory):
         for key, value in config.items("config"):
             options.setdefault("--%s" % key, value)
 
+
+def parse_do_not_fingerprint_option(options):
+    if "--do-not-fingerprint" in options:
+        return [name.strip() for name in options["--do-not-fingerprint"].split(",")]
+    return []
+
+
 def main(argv):
     try:
         opts, args = getopt.getopt(argv[1:], "s:r:l:d:cfh",
                                    ["batch", "dry-run", "change", "default=", "save=", "remove=", "load=",
-                                    "force", "fingerprint", "config", "debug", "skip-options=", "help"])
+                                    "force", "fingerprint", "config", "debug", "skip-options=",
+                                    "do-not-fingerprint=", "help"])
     except getopt.GetoptError as e:
         print("Failed to parse options: {0}.\n"
               "Use --help to get usage information.".format(str(e)),
@@ -1034,6 +1048,8 @@ def main(argv):
         sys.exit(posix.EX_USAGE)
 
     options = dict(opts)
+
+    skip_from_fingerprinting = parse_do_not_fingerprint_option(options)
 
     if "-h" in options or "--help" in options:
         exit_help()
@@ -1082,7 +1098,7 @@ def main(argv):
     config, modes = parse_xrandr_output()
 
     if "--fingerprint" in options:
-        output_setup(config, sys.stdout)
+        output_setup(config, sys.stdout, skip_from_fingerprinting)
         sys.exit(0)
 
     if "--config" in options:
@@ -1105,7 +1121,7 @@ def main(argv):
                                      "This configuration name is a reserved virtual configuration." % options["--save"])
         try:
             profile_folder = os.path.join(profile_path, options["--save"])
-            save_configuration(profile_folder, config)
+            save_configuration(profile_folder, config, skip_from_fingerprinting)
             exec_scripts(profile_folder, "postsave", {"CURRENT_PROFILE": options["--save"], "PROFILE_FOLDER": profile_folder})
         except Exception as e:
             raise AutorandrException("Failed to save current configuration as profile '%s'" % (options["--save"],), e)
@@ -1142,7 +1158,7 @@ def main(argv):
             raise AutorandrException("Failed to remove profile '%s'" % (options["--remove"],), e)
         sys.exit(0)
 
-    detected_profiles = find_profiles(config, profiles)
+    detected_profiles = find_profiles(config, profiles, skip_from_fingerprinting)
     load_profile = False
 
     if "-l" in options:
@@ -1231,7 +1247,7 @@ def main(argv):
             raise AutorandrException("Failed to apply profile '%s'" % load_profile, e, True)
 
         if "--dry-run" not in options and "--debug" in options:
-            new_config, _ = parse_xrandr_output()
+            new_config, _ = parse_xrandr_output(skip_from_fingerprinting)
             if not is_equal_configuration(new_config, load_config):
                 print("The configuration change did not go as expected:")
                 print_profile_differences(new_config, load_config)

@@ -9,12 +9,12 @@ except:
 setup(
     name='autorandr',
 
-    version='1.4-2',
+    version='1.4-2-so',
 
     description='Automatically select a display configuration based on connected devices',
     long_description=long_description,
 
-    url='https://github.com/phillipberndt/autorandr',
+    url='https://github.com/krzysztofmo/autorandr',
 
     author='Phillip Berndt',
     author_email='phillip.berndt@googlemail.com',

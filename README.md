@@ -122,6 +122,31 @@ You can store default values for any option in an INI-file in
 `~/.config/autorandr/settings.ini` in a section `config`. The most useful
 candidate for doing that is `skip-options`, if you need it.
 
+If you are trying to configure auto-switching on laptop you might run into
+problems, because by default internal display is always fingerprinted
+even when the lid is closed. Say you wanted to create two profiles: one with
+the lid closed and an external display connected and another one with lid open
+and the same external display connected. You will end up with two different
+profiles, but autorandrw won't be able to detect the correct profile, because
+both of the profiles will match. The solution is to exclude internal display
+from being fingerprinted when the lid is closed by passing output's name to
+--skip-outputs option.
+
+    $ autorandr --skip-outputs eDP-1-1
+
+Here is an example of simple wrapper script for autorandr, which excludes
+internal display from being fingerprinted only when the lid is closed.
+
+```bash
+#!/usr/bin/env bash
+# This a wrapper script for autorandr
+
+INTERNAL_DISPLAY_NAME="eDP-1-1"
+
+exec "autorandr" "$@" $([[ $(cat /proc/acpi/button/lid/LID0/state | awk '{print $2}') == 'closed' ]] \
+&& echo "--skip-outputs" "${INTERNAL_DISPLAY_NAME}")
+```
+
 ## Hook scripts
 
 Three more scripts can be placed in the configuration directory (as 

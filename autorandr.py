@@ -26,6 +26,7 @@ from __future__ import print_function
 
 import binascii
 import copy
+import fnmatch
 import getopt
 import hashlib
 import os
@@ -47,6 +48,8 @@ if sys.version_info.major == 2:
 else:
     import configparser
 
+__version__ = "1.5"
+
 try:
     input = raw_input
 except NameError:
@@ -65,14 +68,16 @@ help_text = """
 Usage: autorandr [options]
 
 -h, --help              get this small help
--c, --change            reload current setup
+-c, --change            automatically load the first detected profile
 -d, --default <profile> make profile <profile> the default profile
 -l, --load <profile>    load profile <profile>
 -s, --save <profile>    save your current setup to profile <profile>
 -r, --remove <profile>  remove profile <profile>
 --batch                 run autorandr for all users with active X11 sessions
+--current               only list current (active) configuration(s)
 --config                dump your current xrandr setup
 --debug                 enable verbose output
+--detected              only list detected (available) configuration(s)
 --dry-run               don't change anything, only print the xrandr commands
 --fingerprint           fingerprint your current hardware setup
 --force                 force (re)loading of a profile
@@ -80,6 +85,7 @@ Usage: autorandr [options]
                         either creating or matching a profile
 --skip-options <option> comma separated list of xrandr arguments (e.g. "gamma")
                         to skip both in detecting changes and applying a profile
+--version               show version information and exit
 
  If no suitable profile can be identified, the current configuration is kept.
  To change this behaviour and switch to a fallback configuration, specify
@@ -399,6 +405,10 @@ class XrandrOutput(object):
                 return hashlib.md5(binascii.unhexlify(other.edid)).hexdigest() == self.edid
             if len(self.edid) != 32 and len(other.edid) == 32 and not self.edid.startswith(XrandrOutput.EDID_UNAVAILABLE):
                 return hashlib.md5(binascii.unhexlify(self.edid)).hexdigest() == other.edid
+            if "*" in self.edid:
+                return fnmatch.fnmatch(other.edid, self.edid)
+            elif "*" in other.edid:
+                return fnmatch.fnmatch(self.edid, other.edid)
         return self.edid == other.edid
 
     def __ne__(self, other):
@@ -626,6 +636,35 @@ def call_and_retry(*args, **kwargs):
     return retval
 
 
+def get_fb_dimensions(configuration):
+    width = 0
+    height = 0
+    for output in configuration.values():
+        if "off" in output.options or not output.edid:
+            continue
+        # This won't work with all modes -- but it's a best effort.
+        o_width, o_height = map(int, output.options["mode"].split("x"))
+        if "transform" in output.options:
+            a, b, c, d, e, f, g, h, i = map(float, output.options["transform"].split(","))
+            w = (g * o_width + h * o_height + i)
+            x = (a * o_width + b * o_height + c) / w
+            y = (d * o_width + e * o_height + f) / w
+            o_width, o_height = x, y
+        if "pos" in output.options:
+            o_left, o_top = map(int, output.options["pos"].split("x"))
+            o_width += o_left
+            o_height += o_top
+        if "panning" in output.options:
+            match = re.match("(?P<w>[0-9]+)x(?P<h>[0-9]+)(?:\+(?P<x>[0-9]+))?(?:\+(?P<y>[0-9]+))?.*", output.options["panning"])
+            if match:
+                detail = match.groupdict()
+                o_width = int(detail.get("w")) + int(detail.get("x", "0"))
+                o_height = int(detail.get("h")) + int(detail.get("y", "0"))
+        width = max(width, o_width)
+        height = max(height, o_height)
+    return int(width), int(height)
+
+
 def apply_configuration(new_configuration, current_configuration, dry_run=False):
     "Apply a configuration"
     outputs = sorted(new_configuration.keys(), key=lambda x: new_configuration[x].sort_key)
@@ -653,6 +692,13 @@ def apply_configuration(new_configuration, current_configuration, dry_run=False)
     # - Some implementations can not handle --panning without specifying --fb
     #   explicitly, so avoid it unless necessary.
     #   (See https://github.com/phillipberndt/autorandr/issues/72)
+
+    fb_dimensions = get_fb_dimensions(new_configuration)
+    try:
+        base_argv += ["--fb", "%dx%d" % fb_dimensions]
+    except:
+        # Failed to obtain frame-buffer size. Doesn't matter, xrandr will choose for the user.
+        pass
 
     auxiliary_changes_pre = []
     disable_outputs = []
@@ -1038,8 +1084,8 @@ def main(argv):
     try:
         opts, args = getopt.getopt(argv[1:], "s:r:l:d:cfh",
                                    ["batch", "dry-run", "change", "default=", "save=", "remove=", "load=",
-                                    "force", "fingerprint", "config", "debug", "skip-options=",
-                                    "skip-outputs=", "help"])
+                                    "force", "fingerprint", "config", "debug", "skip-options=", "help",
+                                    "current", "detected", "version", "skip-outputs="])
     except getopt.GetoptError as e:
         print("Failed to parse options: {0}.\n"
               "Use --help to get usage information.".format(str(e)),
@@ -1052,6 +1098,14 @@ def main(argv):
 
     if "-h" in options or "--help" in options:
         exit_help()
+
+    if "--version" in options:
+        print("autorandr " + __version__)
+        sys.exit(0)
+
+    if "--current" in options and "--detected" in options:
+        print("--current and --detected are mutually exclusive.", file=sys.stderr)
+        sys.exit(posix.EX_USAGE)
 
     # Batch mode
     if "--batch" in options:
@@ -1121,7 +1175,11 @@ def main(argv):
         try:
             profile_folder = os.path.join(profile_path, options["--save"])
             save_configuration(profile_folder, config, exempt_from_fingerprinting)
-            exec_scripts(profile_folder, "postsave", {"CURRENT_PROFILE": options["--save"], "PROFILE_FOLDER": profile_folder})
+            exec_scripts(profile_folder, "postsave", {
+                "CURRENT_PROFILE": options["--save"],
+                "PROFILE_FOLDER": profile_folder,
+                "MONITORS": ":".join(config.keys()),
+            })
         except Exception as e:
             raise AutorandrException("Failed to save current configuration as profile '%s'" % (options["--save"],), e)
         print("Saved current configuration as profile '%s'" % options["--save"])
@@ -1180,22 +1238,30 @@ def main(argv):
 
         for profile_name in profiles.keys():
             if profile_blocked(os.path.join(profile_path, profile_name), block_script_metadata):
-                print("%s (blocked)" % profile_name)
+                if "--current" not in options and "--detected" not in options:
+                    print("%s (blocked)" % profile_name)
                 continue
             props = []
             if profile_name in detected_profiles:
                 props.append("(detected)")
                 if ("-c" in options or "--change" in options) and not load_profile:
                     load_profile = profile_name
+            elif "--detected" in options:
+                continue
             if profile_name in current_profiles:
                 props.append("(current)")
-            print("%s%s%s" % (profile_name, " " if props else "", " ".join(props)))
+            elif "--current" in options:
+                continue
+            if "--current" in options or "--detected" in options:
+                print("%s" % (profile_name, ))
+            else:
+                print("%s%s%s" % (profile_name, " " if props else "", " ".join(props)))
             if not configs_are_equal and "--debug" in options and profile_name in detected_profiles:
                 print_profile_differences(config, profiles[profile_name]["config"])
 
     if "-d" in options:
         options["--default"] = options["-d"]
-    if not load_profile and "--default" in options:
+    if not load_profile and "--default" in options and ("-c" in options or "--change" in options):
         load_profile = options["--default"]
 
     if load_profile:
@@ -1233,6 +1299,7 @@ def main(argv):
                 script_metadata = {
                     "CURRENT_PROFILE": load_profile,
                     "PROFILE_FOLDER": scripts_path,
+                    "MONITORS": ":".join(load_config.keys()),
                 }
                 exec_scripts(scripts_path, "preswitch", script_metadata)
                 if "--debug" in options:

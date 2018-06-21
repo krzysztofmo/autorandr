@@ -38,6 +38,7 @@ Contributors to this version of autorandr are:
 * Adrián López
 * andersonjacob
 * Alexander Wirt
+* Brice Waegeneire
 * Chris Dunder
 * Christoph Gysin
 * Daniel Hahler
@@ -141,13 +142,15 @@ internal display from being fingerprinted only when the lid is closed.
 #!/usr/bin/env bash
 # This a wrapper script for autorandr
 
-INTERNAL_DISPLAY_NAME="eDP-1-1"
+INTERNAL_DISPLAY_NAME="eDP-1"
 
 exec "autorandr" "$@" $([[ $(cat /proc/acpi/button/lid/LID0/state | awk '{print $2}') == 'closed' ]] \
 && echo "--skip-outputs" "${INTERNAL_DISPLAY_NAME}")
 ```
 
-## Hook scripts
+## Advanced usage
+
+### Hook scripts
 
 Three more scripts can be placed in the configuration directory (as 
 (as defined by the [XDG spec](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html),
@@ -189,17 +192,36 @@ If you switch back from `docked` to `mobile`, `~/.config/autorandr/postswitch`
 is executed instead of the `mobile` specific `postswitch`.
 
 In these scripts, some of autorandr's state is exposed as environment variables
-prefixed with `AUTORANDR_`. The most useful one is `$AUTORANDR_CURRENT_PROFILE`.
+prefixed with `AUTORANDR_`, such as:
+- `AUTORANDR_CURRENT_PROFILE`
+- `AUTORANDR_CURRENT_PROFILES`
+- `AUTORANDR_PROFILE_FOLDER`
+- `AUTORANDR_MONITORS`
 
 If you experience issues with xrandr being executed too early after connecting
 a new monitor, then you can use a `predetect` script to delay the execution.
 Write e.g. `sleep 1` into that file to make autorandr wait a second before
 running `xrandr`.
 
+### Wildcard EDID matching
+
+The EDID strings in the `~/.config/autorandr/*/setup` files may contain an
+asterisk to enable wildcard matching: Such EDIDs are matched against connected
+monitors using the usual file name globbing rules. This can be used to create
+profiles matching multiple (or any) monitors.
+
 ## Changelog
 
+* *2018-04-19* Bugfix: Do not load default profile unless --change is set
+* *2018-04-30* Added a `AUTORANDR_MONITORS` variable to hooks (by @bricewge, #106)
+
+**autorandr 1.5**
+
+* *2018-01-03* Add --version
 * *2018-01-04* Fixed vertical/horizontal/clone-largest virtual profiles
 * *2018-03-07* Output all non-error messages to stdout instead of stderr
+* *2018-03-25* Add --detected and --current to filter the profile list output
+* *2018-03-25* Allow wildcard matching in EDIDs
 
 **autorandr 1.4**
 

@@ -147,7 +147,7 @@ problems, because by default internal display is always fingerprinted
 even when the lid is closed. Say you wanted to create two profiles: one with
 the lid closed and an external display connected and another one with lid open
 and the same external display connected. You will end up with two different
-profiles, but autorandrw won't be able to detect the correct profile, because
+profiles, but autorandr won't be able to detect the correct profile, because
 both of the profiles will match. The solution is to exclude internal display
 from being fingerprinted when the lid is closed by passing output's name to
 --skip-outputs option.

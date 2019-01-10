@@ -9,7 +9,7 @@ except:
 setup(
     name='autorandr',
 
-    version='1.5-1-so',
+    version='1.7-1-so',
 
     description='Automatically select a display configuration based on connected devices',
     long_description=long_description,

@@ -48,7 +48,7 @@ if sys.version_info.major == 2:
 else:
     import configparser
 
-__version__ = "1.5"
+__version__ = "1.7"
 
 try:
     input = raw_input
@@ -643,13 +643,17 @@ def get_fb_dimensions(configuration):
         if "off" in output.options or not output.edid:
             continue
         # This won't work with all modes -- but it's a best effort.
-        o_width, o_height = map(int, output.options["mode"].split("x"))
+        o_mode = re.search("[0-9]{3,}x[0-9]{3,}", output.options["mode"]).group(0)
+        o_width, o_height = map(int, o_mode.split("x"))
         if "transform" in output.options:
             a, b, c, d, e, f, g, h, i = map(float, output.options["transform"].split(","))
             w = (g * o_width + h * o_height + i)
             x = (a * o_width + b * o_height + c) / w
             y = (d * o_width + e * o_height + f) / w
             o_width, o_height = x, y
+        if "rotate" in output.options:
+            if output.options["rotate"] in ("left", "right"):
+                o_width, o_height = o_height, o_width
         if "pos" in output.options:
             o_left, o_top = map(int, output.options["pos"].split("x"))
             o_width += o_left
@@ -766,14 +770,14 @@ def is_equal_configuration(source_configuration, target_configuration):
     """
     for output in target_configuration.keys():
         if "off" in target_configuration[output].options:
-            if (output in source_configuration or "off" not in source_configuration[output].options):
+            if (output in source_configuration and "off" not in source_configuration[output].options):
                 return False
         else:
             if (output not in source_configuration) or (source_configuration[output] != target_configuration[output]):
                 return False
     for output in source_configuration.keys():
         if "off" in source_configuration[output].options:
-            if output in target_configuration and "off" not in target_configuration.options:
+            if output in target_configuration and "off" not in target_configuration[output].options:
                 return False
         else:
             if output not in target_configuration:
@@ -1078,6 +1082,15 @@ def dispatch_call_to_sessions(argv):
             X11_displays_done.add(display)
 
 
+def enabled_monitors(config):
+    monitors = []
+    for monitor in config:
+        if "--off" in config[monitor].option_vector:
+            continue
+        monitors.append(monitor)
+    return monitors
+
+
 def read_config(options, directory):
     """Parse a configuration config.ini from directory and merge it into
     the options dictionary"""
@@ -1192,7 +1205,7 @@ def main(argv):
             exec_scripts(profile_folder, "postsave", {
                 "CURRENT_PROFILE": options["--save"],
                 "PROFILE_FOLDER": profile_folder,
-                "MONITORS": ":".join(config.keys()),
+                "MONITORS": ":".join(enabled_monitors(config)),
             })
         except Exception as e:
             raise AutorandrException("Failed to save current configuration as profile '%s'" % (options["--save"],), e)
@@ -1313,7 +1326,7 @@ def main(argv):
                 script_metadata = {
                     "CURRENT_PROFILE": load_profile,
                     "PROFILE_FOLDER": scripts_path,
-                    "MONITORS": ":".join(load_config.keys()),
+                    "MONITORS": ":".join(enabled_monitors(load_config)),
                 }
                 exec_scripts(scripts_path, "preswitch", script_metadata)
                 if "--debug" in options:

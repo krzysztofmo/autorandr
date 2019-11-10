@@ -48,7 +48,7 @@ if sys.version_info.major == 2:
 else:
     import configparser
 
-__version__ = "1.7"
+__version__ = "1.8.1"
 
 try:
     input = raw_input
@@ -80,7 +80,7 @@ Usage: autorandr [options]
 --detected              only list detected (available) configuration(s)
 --dry-run               don't change anything, only print the xrandr commands
 --fingerprint           fingerprint your current hardware setup
---force                 force (re)loading of a profile
+--force                 force (re)loading of a profile / overwrite exiting files
 --skip-outputs <output> comma separated output names to skip from fingerprinting when 
                         either creating or matching a profile
 --skip-options <option> comma separated list of xrandr arguments (e.g. "gamma")
@@ -142,7 +142,7 @@ class XrandrOutput(object):
 
     # This regular expression is used to parse an output in `xrandr --verbose'
     XRANDR_OUTPUT_REGEXP = """(?x)
-        ^(?P<output>[^ ]+)\s+                                                           # Line starts with output name
+        ^\s*(?P<output>\S[^ ]*)\s+                                                      # Line starts with output name
         (?:                                                                             # Differentiate disconnected and connected
             disconnected |                                                              # in first line
             unknown\ connection |
@@ -163,6 +163,7 @@ class XrandrOutput(object):
         (?:[\ \t]*border\ (?P<border>(?:[0-9]+/){3}[0-9]+))?                            # Border information
         (?:\s*(?:                                                                       # Properties of the output
             Gamma: (?P<gamma>(?:inf|[0-9\.: e])+) |                                     # Gamma value
+            CRTC:\s*(?P<crtc>[0-9]) |                                                   # CRTC value
             Transform: (?P<transform>(?:[\-0-9\. ]+\s+){3}) |                           # Transformation matrix
             EDID: (?P<edid>\s*?(?:\\n\\t\\t[0-9a-f]+)+) |                               # EDID of the output
             (?![0-9])[^:\s][^:\n]+:.*(?:\s\\t[\\t ].+)*                                 # Other properties
@@ -319,6 +320,12 @@ class XrandrOutput(object):
         else:
             edid = "%s-%s" % (XrandrOutput.EDID_UNAVAILABLE, match["output"])
 
+        # An output can be disconnected but still have a mode configured. This can only happen
+        # as a residual situation after a disconnect, you cannot associate a mode with an disconnected
+        # output.
+        #
+        # This code needs to be careful not to mix the two. An output should only be configured to
+        # "off" if it doesn't have a mode associated with it, which is modelled as "not a width" here.
         if not match["width"]:
             options["off"] = None
         else:
@@ -328,10 +335,11 @@ class XrandrOutput(object):
                 options["mode"] = "%sx%s" % (match["mode_width"], match["mode_height"])
             else:
                 if match["rotate"] not in ("left", "right"):
-                    options["mode"] = "%sx%s" % (match["width"], match["height"])
+                    options["mode"] = "%sx%s" % (match["width"] or 0, match["height"] or 0)
                 else:
-                    options["mode"] = "%sx%s" % (match["height"], match["width"])
-            options["rotate"] = match["rotate"]
+                    options["mode"] = "%sx%s" % (match["height"] or 0, match["width"] or 0)
+            if match["rotate"]:
+                options["rotate"] = match["rotate"]
             if match["primary"]:
                 options["primary"] = None
             if match["reflect"] == "X":
@@ -340,7 +348,8 @@ class XrandrOutput(object):
                 options["reflect"] = "y"
             elif match["reflect"] == "X and Y":
                 options["reflect"] = "xy"
-            options["pos"] = "%sx%s" % (match["x"], match["y"])
+            if match["x"] or match["y"]:
+                options["pos"] = "%sx%s" % (match["x"] or "0", match["y"] or "0")
             if match["panning"]:
                 panning = [match["panning"]]
                 if match["tracking"]:
@@ -364,6 +373,8 @@ class XrandrOutput(object):
                 # so we approximate by 1e-10.
                 gamma = ":".join([str(max(1e-10, round(1. / float(x), 3))) for x in gamma.split(":")])
                 options["gamma"] = gamma
+            if match["crtc"]:
+                options["crtc"] = match["crtc"]
             if match["rate"]:
                 options["rate"] = match["rate"]
 
@@ -576,6 +587,17 @@ def profile_blocked(profile_path, meta_information=None):
     return not exec_scripts(profile_path, "block", meta_information)
 
 
+def check_configuration_pre_save(configuration):
+    "Check that a configuration is safe for saving."
+    outputs = sorted(configuration.keys(), key=lambda x: configuration[x].sort_key)
+    for output in outputs:
+        if "off" not in configuration[output].options and not configuration[output].edid:
+            return ("`%(o)s' is not off (has a mode configured) but is disconnected (does not have an EDID).\n"
+                    "This typically means that it has been recently unplugged and then not properly disabled\n"
+                    "by the user. Please disable it (e.g. using `xrandr --output %(o)s --off`) and then rerun\n"
+                    "this command.") % {"o": output}
+
+
 def output_configuration(configuration, config):
     "Write a configuration file"
     outputs = sorted(configuration.keys(), key=lambda x: configuration[x].sort_key)
@@ -591,13 +613,20 @@ def output_setup(configuration, setup, exempt_from_fingerprinting):
             print(output, configuration[output].edid, file=setup)
 
 
-def save_configuration(profile_path, configuration, exempt_from_fingerprinting):
+def save_configuration(profile_path, profile_name, configuration, exempt_from_fingerprinting=[], forced=False):
     "Save a configuration into a profile"
     if not os.path.isdir(profile_path):
         os.makedirs(profile_path)
-    with open(os.path.join(profile_path, "config"), "w") as config:
+    config_path = os.path.join(profile_path, "config")
+    setup_path = os.path.join(profile_path, "setup")
+    if os.path.isfile(config_path) and not forced:
+        raise AutorandrException('Refusing to overwrite config "{}" without passing "--force"!'.format(profile_name))
+    if os.path.isfile(setup_path) and not forced:
+        raise AutorandrException('Refusing to overwrite config "{}" without passing "--force"!'.format(profile_name))
+
+    with open(config_path, "w") as config:
         output_configuration(configuration, config)
-    with open(os.path.join(profile_path, "setup"), "w") as setup:
+    with open(setup_path, "w") as setup:
         output_setup(configuration, setup, exempt_from_fingerprinting)
 
 
@@ -643,7 +672,10 @@ def get_fb_dimensions(configuration):
         if "off" in output.options or not output.edid:
             continue
         # This won't work with all modes -- but it's a best effort.
-        o_mode = re.search("[0-9]{3,}x[0-9]{3,}", output.options["mode"]).group(0)
+        match = re.search("[0-9]{3,}x[0-9]{3,}", output.options["mode"])
+        if not match:
+            return None
+        o_mode = match.group(0)
         o_width, o_height = map(int, o_mode.split("x"))
         if "transform" in output.options:
             a, b, c, d, e, f, g, h, i = map(float, output.options["transform"].split(","))
@@ -661,9 +693,9 @@ def get_fb_dimensions(configuration):
         if "panning" in output.options:
             match = re.match("(?P<w>[0-9]+)x(?P<h>[0-9]+)(?:\+(?P<x>[0-9]+))?(?:\+(?P<y>[0-9]+))?.*", output.options["panning"])
             if match:
-                detail = match.groupdict()
-                o_width = int(detail.get("w")) + int(detail.get("x", "0"))
-                o_height = int(detail.get("h")) + int(detail.get("y", "0"))
+                detail = match.groupdict(default="0")
+                o_width = int(detail.get("w")) + int(detail.get("x"))
+                o_height = int(detail.get("h")) + int(detail.get("y"))
         width = max(width, o_width)
         height = max(height, o_height)
     return int(width), int(height)
@@ -712,6 +744,9 @@ def apply_configuration(new_configuration, current_configuration, dry_run=False)
         if not new_configuration[output].edid or "off" in new_configuration[output].options:
             disable_outputs.append(new_configuration[output].option_vector)
         else:
+            if output not in current_configuration:
+                raise AutorandrException("New profile configures output %s which does not exist in current xrandr --verbose output. "
+                                         "Don't know how to proceed." % output)
             if "off" not in current_configuration[output].options:
                 remain_active_count += 1
 
@@ -1199,14 +1234,21 @@ def main(argv):
         if options["--save"] in (x[0] for x in virtual_profiles):
             raise AutorandrException("Cannot save current configuration as profile '%s':\n"
                                      "This configuration name is a reserved virtual configuration." % options["--save"])
+        error = check_configuration_pre_save(config)
+        if error:
+            print("Cannot save current configuration as profile '%s':" % options["--save"])
+            print(error)
+            sys.exit(1)
         try:
             profile_folder = os.path.join(profile_path, options["--save"])
-            save_configuration(profile_folder, config, exempt_from_fingerprinting)
+            save_configuration(profile_folder, options['--save'], config, exempt_from_fingerprinting, forced="--force" in options)
             exec_scripts(profile_folder, "postsave", {
                 "CURRENT_PROFILE": options["--save"],
                 "PROFILE_FOLDER": profile_folder,
                 "MONITORS": ":".join(enabled_monitors(config)),
             })
+        except AutorandrException as e:
+            raise e
         except Exception as e:
             raise AutorandrException("Failed to save current configuration as profile '%s'" % (options["--save"],), e)
         print("Saved current configuration as profile '%s'" % options["--save"])
